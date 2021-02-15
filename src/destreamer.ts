@@ -6,7 +6,7 @@ import { getPuppeteerChromiumPath } from './PuppeteerHelper';
 import { drawThumbnail } from './Thumbnail';
 import { TokenCache, refreshSession } from './TokenCache';
 import { Video, Session } from './Types';
-import { checkRequirements, ffmpegTimemarkToChunk, parseInputFile, parseCLIinput} from './Utils';
+import { checkRequirements, ffmpegTimemarkToChunk, parseInputFile, parseCLIinput } from './Utils';
 import { getVideoInfo, createUniquePath } from './VideoUtils';
 
 import cliProgress from 'cli-progress';
@@ -14,6 +14,7 @@ import fs from 'fs';
 import isElevated from 'is-elevated';
 import puppeteer from 'puppeteer';
 import { ApiClient } from './ApiClient';
+const fileExists = require('file-exists');
 
 
 const { FFmpegCommand, FFmpegInput, FFmpegOutput } = require('@tedconf/fessonia')();
@@ -44,7 +45,7 @@ async function init(): Promise<void> {
 }
 
 
-async function DoInteractiveLogin(url: string, username?: string): Promise<Session> {
+async function DoInteractiveLogin(url: string, username?: string, password?: string): Promise<Session> {
 
     logger.info('Launching headless Chrome to perform the OpenID Connect dance...');
 
@@ -64,17 +65,33 @@ async function DoInteractiveLogin(url: string, username?: string): Promise<Sessi
     await page.goto(url, { waitUntil: 'load' });
 
     try {
-        if (username) {
-            await page.waitForSelector('input[type="email"]', {timeout: 3000});
-            await page.keyboard.type(username);
-            await page.click('input[type="submit"]');
-        }
-        else {
-            /* If a username was not provided we let the user take actions that
-            lead up to the video page. */
+        if (argv.keepLoginCookies) {
+                if (password) {
+                    await page.waitForSelector('#tilesHolder > div.tile-container');
+                    page.click('#tilesHolder > div.tile-container');
+                    await page.waitForXPath('//*[@id="idA_PWD_ForgotPassword"]', { timeout: 3000 });
+                    await page.keyboard.type(password);
+                    await page.click('input[type="submit"]');
+                }
+
+        } else {
+            if (username) {
+                await page.waitForSelector('input[type="email"]', { timeout: 3000 });
+                await page.keyboard.type(username);
+                await page.waitForSelector('input[type="submit"]', { timeout: 3000 });
+                await page.click('input[type="submit"]');
+                if (password) {
+                    await page.waitForXPath('//*[@id="idA_PWD_ForgotPassword"]', { timeout: 3000 });
+                    await page.keyboard.type(password);
+                    await page.click('input[type="submit"]');
+                }
+            }
         }
     }
     catch (e) {
+
+
+
         /* If there is no email input selector we aren't in the login module,
         we are probably using the cache to aid the login.
         It could finish the login on its own if the user said 'yes' when asked to
@@ -120,13 +137,13 @@ async function DoInteractiveLogin(url: string, username?: string): Promise<Sessi
 }
 
 
-async function downloadVideo(videoGUIDs: Array<string>, outputDirectories: Array<string>, session: Session): Promise<void> {
+async function downloadVideo(videoGUIDs: Array<string>, outputDirectories: Array<string>, session: Session, username?: string, password?: string): Promise<void> {
 
     logger.info('Fetching videos info... \n');
-    const videos: Array<Video> = createUniquePath (
+    const videos: Array<Video> = createUniquePath(
         await getVideoInfo(videoGUIDs, session, argv.closedCaptions),
         outputDirectories, argv.outputTemplate, argv.format, argv.skip
-        );
+    );
 
     if (argv.simulate) {
         videos.forEach((video: Video) => {
@@ -151,7 +168,10 @@ async function downloadVideo(videoGUIDs: Array<string>, outputDirectories: Array
 
         if (argv.keepLoginCookies && index !== 0) {
             logger.info('Trying to refresh token...');
-            session = await refreshSession('https://web.microsoftstream.com/video/' + videoGUIDs[index]);
+            
+            //session = await refreshSession('https://web.microsoftstream.com/video/' + videoGUIDs[index], password);
+            session = tokenCache.Read() ?? await DoInteractiveLogin('https://web.microsoftstream.com/', username, password);
+
             ApiClient.getInstance().setSession(session);
         }
 
@@ -167,10 +187,10 @@ async function downloadVideo(videoGUIDs: Array<string>, outputDirectories: Array
 
         logger.info(`\nDownloading Video: ${video.title} \n`);
         logger.verbose('Extra video info \n' +
-        '\t Video m3u8 playlist URL: '.cyan + video.playbackUrl + '\n' +
-        '\t Video tumbnail URL: '.cyan + video.posterImageUrl + '\n' +
-        '\t Video subtitle URL (may not exist): '.cyan + video.captionsUrl + '\n' +
-        '\t Video total chunks: '.cyan + video.totalChunks + '\n');
+            '\t Video m3u8 playlist URL: '.cyan + video.playbackUrl + '\n' +
+            '\t Video tumbnail URL: '.cyan + video.posterImageUrl + '\n' +
+            '\t Video subtitle URL (may not exist): '.cyan + video.captionsUrl + '\n' +
+            '\t Video total chunks: '.cyan + video.totalChunks + '\n');
 
         logger.info('Spawning ffmpeg with access token and HLS URL. This may take a few seconds...\n\n');
         if (!process.stdout.columns) {
@@ -201,9 +221,9 @@ async function downloadVideo(videoGUIDs: Array<string>, outputDirectories: Array
         const cleanupFn: () => void = () => {
             pbar.stop();
 
-           if (argv.noCleanup) {
-               return;
-           }
+            if (argv.noCleanup) {
+                return;
+            }
 
             try {
                 fs.unlinkSync(video.outPath);
@@ -268,10 +288,23 @@ async function downloadVideo(videoGUIDs: Array<string>, outputDirectories: Array
 
 async function main(): Promise<void> {
     await init(); // must be first
+    let isCredentialsThere = fs.existsSync('credentials.txt');
+    let username;
+    let password;
+    if (isCredentialsThere) {
+        let rawdata = fs.readFileSync('credentials.txt');
+        let creds = JSON.parse(rawdata.toString());
+        username = creds.credentials.username;
+        password = creds.credentials.password;
+    } else {
+        username = argv.username;
+    }
+    //Set username and password by reading credentials.txt
+
 
     let session: Session;
     // eslint-disable-next-line prefer-const
-    session = tokenCache.Read() ?? await DoInteractiveLogin('https://web.microsoftstream.com/', argv.username);
+    session = tokenCache.Read() ?? await DoInteractiveLogin('https://web.microsoftstream.com/', username, password);
 
     logger.verbose('Session and API info \n' +
         '\t API Gateway URL: '.cyan + session.ApiGatewayUri + '\n' +
@@ -282,11 +315,11 @@ async function main(): Promise<void> {
 
     if (argv.videoUrls) {
         logger.info('Parsing video/group urls');
-        [videoGUIDs, outDirs] =  await parseCLIinput(argv.videoUrls as Array<string>, argv.outputDirectory, session);
+        [videoGUIDs, outDirs] = await parseCLIinput(argv.videoUrls as Array<string>, argv.outputDirectory, session);
     }
     else {
         logger.info('Parsing input file');
-        [videoGUIDs, outDirs] =  await parseInputFile(argv.inputFile!, argv.outputDirectory, session);
+        [videoGUIDs, outDirs] = await parseInputFile(argv.inputFile!, argv.outputDirectory, session);
     }
 
     logger.verbose('List of GUIDs and corresponding output directory \n' +
@@ -294,7 +327,8 @@ async function main(): Promise<void> {
             `\thttps://web.microsoftstream.com/video/${guid} => ${outDirs[i]} \n`).join(''));
 
 
-    downloadVideo(videoGUIDs, outDirs, session);
+    downloadVideo(videoGUIDs, outDirs, session, username, password);
+
 }
 
 

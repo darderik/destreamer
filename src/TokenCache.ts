@@ -53,7 +53,7 @@ export class TokenCache {
 }
 
 
-export async function refreshSession(url: string): Promise<Session> {
+export async function refreshSession(url: string, password?: string): Promise<Session> {
     const videoId: string = url.split('/').pop() ?? process.exit(ERROR_CODE.INVALID_VIDEO_GUID);
 
     const browser: puppeteer.Browser = await puppeteer.launch({
@@ -77,16 +77,25 @@ export async function refreshSession(url: string): Promise<Session> {
 
     while (!session) {
         try {
-            let sessionInfo: any;
-            session = await page.evaluate(
-                () => {
-                    return {
-                        AccessToken: sessionInfo.AccessToken,
-                        ApiGatewayUri: sessionInfo.ApiGatewayUri,
-                        ApiGatewayVersion: sessionInfo.ApiGatewayVersion
-                    };
-                }
-            );
+            if (password) {
+                await page.waitForSelector('#tilesHolder > div.tile-container');
+                page.click('#tilesHolder > div.tile-container');
+                await page.waitForXPath('//*[@id="idA_PWD_ForgotPassword"]', { timeout: 3000 });
+                await page.keyboard.type(password);
+                await page.click('input[type="submit"]');
+            }
+                let sessionInfo: any;
+                session = await page.evaluate(
+                    () => {
+                        return {
+                            AccessToken: sessionInfo.AccessToken,
+                            ApiGatewayUri: sessionInfo.ApiGatewayUri,
+                            ApiGatewayVersion: sessionInfo.ApiGatewayVersion
+                        };
+                    }
+                );
+
+
         }
         catch (error) {
             if (tries > 5) {
